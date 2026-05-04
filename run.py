@@ -1,13 +1,5 @@
 """
 run.py — Entry point for Argo Search Bot
-
-Ye file:
-1. Environment variables check karta hai
-2. Telethon se Telegram login karta hai (pehli baar phone/OTP maangega)
-3. Bot start karta hai
-
-Usage:
-    python run.py
 """
 
 import os
@@ -22,14 +14,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ── Step 1: Check required environment variables ───────────────────────────────
-
 def check_env():
-    missing = []
     BOT_TOKEN = os.getenv("BOT_TOKEN", "")
     API_ID    = os.getenv("API_ID", "0")
     API_HASH  = os.getenv("API_HASH", "")
 
+    missing = []
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         missing.append("BOT_TOKEN")
     if API_ID == "0" or not API_ID:
@@ -41,47 +31,39 @@ def check_env():
         logger.error("❌ Missing environment variables:")
         for var in missing:
             logger.error(f"   → {var} is not set!")
-        logger.error("")
-        logger.error("📖 Setup karo:")
-        logger.error("   export BOT_TOKEN='your_bot_token'")
-        logger.error("   export API_ID='12345678'")
-        logger.error("   export API_HASH='abcdef...'")
-        logger.error("")
-        logger.error("   Puri guide: API_SETUP.md")
         sys.exit(1)
 
     logger.info("✅ Environment variables OK")
-    return BOT_TOKEN, int(API_ID), API_HASH
 
-
-# ── Step 2: Main async runner ─────────────────────────────────────────────────
 
 async def run():
     from database import SearchDatabase
     from search_engine import SearchEngine
     from telegram_scraper import TelegramScraper
-    from bot import main as bot_main
-
-    logger.info("🚀 Starting Argo Search Bot...")
+    import bot as bot_module
 
     # Init DB
     db = SearchDatabase()
     logger.info("✅ Database ready")
 
     # Init Telethon scraper
-    scraper = TelegramScraper(db)
     logger.info("🔌 Connecting to Telegram API (Telethon)...")
+    scraper = TelegramScraper(db)
     await scraper.start()
     logger.info("✅ Telethon connected — real Telegram search enabled!")
 
-    # Init search engine with scraper
+    # Init SearchEngine
     engine = SearchEngine(db, scraper=scraper)
+    logger.info("✅ Search engine ready")
 
-    # Start bot (pass scraper + engine into bot context)
-    await bot_main(db=db, engine=engine, scraper=scraper)
+    # Inject dependencies into bot module globals
+    bot_module.db      = db
+    bot_module.engine  = engine
+    bot_module.scraper = scraper
 
+    # Start bot — NO arguments
+    await bot_module.main()
 
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("""
@@ -91,14 +73,12 @@ if __name__ == "__main__":
 ╚══════════════════════════════════════╝
     """)
 
-    # Check env vars first
     check_env()
 
-    # Run
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
-        logger.info("🛑 Bot stopped by user (Ctrl+C)")
+        logger.info("🛑 Bot stopped (Ctrl+C)")
     except Exception as e:
         logger.error(f"💥 Fatal error: {e}")
         sys.exit(1)
