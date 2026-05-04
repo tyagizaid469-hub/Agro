@@ -19,8 +19,9 @@ from database import SearchDatabase
 
 # ── Credentials (from environment variables) ──────────────────────────────────
 # Get these from https://my.telegram.org
-API_ID   = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
+API_ID         = int(os.getenv("API_ID", "0"))
+API_HASH       = os.getenv("API_HASH", "")
+SESSION_STRING = os.getenv("SESSION_STRING", "")  # Railway ke liye
 
 # ── Type detection keywords ───────────────────────────────────────────────────
 VIDEO_KEYWORDS = ["video", "movie", "film", "episode", "series", "cinema",
@@ -52,7 +53,10 @@ def make_tags(name: str, description: str) -> str:
 class TelegramScraper:
     def __init__(self, db: SearchDatabase):
         self.db     = db
-        self.client = TelegramClient("search_session", API_ID, API_HASH)
+        # Use StringSession if available (Railway), else file session (local)
+        from telethon.sessions import StringSession
+        session = StringSession(SESSION_STRING) if SESSION_STRING else "search_session"
+        self.client = TelegramClient(session, API_ID, API_HASH)
 
     async def start(self):
         await self.client.start()
