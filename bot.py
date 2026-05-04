@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
-# These are injected by run.py before main() is called
+# Injected by run.py before main() is called
 db      = None
 engine  = None
 scraper = None
@@ -228,8 +228,13 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main():
-    """Bot ka main loop. db/engine/scraper run.py inject karta hai."""
+    """
+    Bot ka main loop — existing event loop ke andar run karta hai.
+    run_polling() ki jagah manual initialize/start/idle use karo
+    taaki Telethon ke asyncio.run() loop se conflict na ho.
+    """
     app = Application.builder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start",    start))
     app.add_handler(CommandHandler("help",     help_cmd))
     app.add_handler(CommandHandler("trending", trending_cmd))
@@ -237,7 +242,16 @@ async def main():
     app.add_handler(CallbackQueryHandler(handle_callback))
 
     logger.info("✅ Bot is running!")
-    await app.run_polling(drop_pending_updates=True)
+
+    async with app:
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+
+        # Run forever until cancelled
+        await asyncio.Event().wait()
+
+        await app.updater.stop()
+        await app.stop()
 
 
 if __name__ == "__main__":
