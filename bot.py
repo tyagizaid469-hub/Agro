@@ -1,13 +1,14 @@
 """
-Argo-like Telegram Search Bot — FIXED VERSION
-- Every result has its own clickable URL button (opens Telegram directly)
-- Strong search: FTS5 + LIKE fallback + partial word match
-- Filter buttons work properly
-- No more "Username not found" error
+Argo-like Telegram Search Bot — REAL SEARCH VERSION
+- Searches REAL Telegram channels/groups/videos/music via Telethon
+- Results cached in SQLite for instant repeat searches
+- Clickable URL buttons for every result
+- Filter by type: Channels / Groups / Videos / Music
 """
 
 import logging
 import os
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -17,8 +18,6 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from database import SearchDatabase
-from search_engine import SearchEngine
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -28,8 +27,10 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
-db     = SearchDatabase()
-engine = SearchEngine(db)
+# These are injected by run.py before main() is called
+db      = None
+engine  = None
+scraper = None
 
 # ── Icons ─────────────────────────────────────────────────────────────────────
 TYPE_ICON = {
@@ -56,10 +57,6 @@ def format_count(n: int) -> str:
 
 
 def build_results_message(results: list, query: str, category: str = "all"):
-    """
-    Returns (text, reply_markup).
-    Each result gets its own URL button so the user can tap to open directly.
-    """
     if not results:
         text = (
             f"❌ *No results for* `{query}`\n\n"
@@ -72,24 +69,24 @@ def build_results_message(results: list, query: str, category: str = "all"):
 
     buttons = []
     for r in results:
-        icon    = TYPE_ICON.get(r["type"], "📌")
-        label   = TYPE_LABEL.get(r["type"], "")
-        count   = format_count(r["members"])
-        name    = r["name"]
-        link    = r.get("link", "").strip()
-        desc    = r.get("description", "")
+        icon  = TYPE_ICON.get(r["type"], "📌")
+        label = TYPE_LABEL.get(r["type"], "")
+        count = format_count(r["members"])
+        name  = r["name"]
+        link  = r.get("link", "").strip()
+        desc  = r.get("description", "")
 
-        # Text line in message
         text += f"{icon} *{name}*\n"
         if desc:
-            text += f"    _{desc}_\n"
+            short_desc = desc[:80] + "..." if len(desc) > 80 else desc
+            text += f"    _{short_desc}_\n"
         text += f"    👥 {count}  •  {label}\n\n"
 
-        # Inline URL button — opens Telegram channel/group directly
         if link:
-            buttons.append([InlineKeyboardButton(f"{icon} {name} ({count})", url=link)])
+            buttons.append([
+                InlineKeyboardButton(f"{icon} Open: {name} ({count})", url=link)
+            ])
 
-    # Filter row at the bottom
     filter_row = [
         InlineKeyboardButton("🔄 All",      callback_data=f"filter:{query}:all"),
         InlineKeyboardButton("📢 Channels", callback_data=f"filter:{query}:channel"),
@@ -98,7 +95,6 @@ def build_results_message(results: list, query: str, category: str = "all"):
         InlineKeyboardButton("🎵 Music",    callback_data=f"filter:{query}:music"),
     ]
     buttons.append(filter_row)
-
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -120,7 +116,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     trending = db.get_trending(limit=25)
     text = (
         "🔍 *Argo Search Bot*\n\n"
-        "Search for *channels, groups, videos & music* on Telegram!\n\n"
+        "Search for *real* channels, groups, videos & music on Telegram!\n\n"
         "Just type any keyword below 👇\n\n"
         "🔥 *Trending Searches* — tap to search instantly:"
     )
@@ -134,10 +130,10 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 *How to use:*\n\n"
-        "• Type any keyword to search\n"
-        "• Tap a result button to open it in Telegram\n"
+        "• Type any keyword to search real Telegram\n"
+        "• Tap a result button to open it directly\n"
         "• Use filter buttons to narrow by type\n"
-        "• Tap trending keywords for popular topics\n\n"
+        "• Results are cached — repeat searches are instant\n\n"
         "Commands:\n"
         "/start — Home & trending\n"
         "/trending — Show trending searches\n"
@@ -161,15 +157,27 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     db.log_search(query)
-    results = engine.search(query)
-    text, kb = build_results_message(results, query)
 
-    await update.message.reply_text(
-        text,
+    loading_msg = await update.message.reply_text(
+        f"🔍 Searching Telegram for *{query}*...",
         parse_mode="Markdown",
-        reply_markup=kb,
-        disable_web_page_preview=True,
     )
+
+    try:
+        results = await engine.async_search(query)
+        text, kb = build_results_message(results, query)
+        await loading_msg.edit_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.error(f"Search failed: {e}")
+        await loading_msg.edit_text(
+            "⚠️ Search failed. Please try again.",
+            parse_mode="Markdown",
+        )
 
 
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -177,11 +185,16 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     data = q.data
 
-    # ── Trending keyword tapped ───────────────────────────────────────────────
     if data.startswith("search:"):
         kw = data.split(":", 1)[1]
         db.log_search(kw)
-        results = engine.search(kw)
+
+        await q.message.reply_text(
+            f"🔍 Searching Telegram for *{kw}*...",
+            parse_mode="Markdown",
+        )
+
+        results = await engine.async_search(kw)
         text, kb = build_results_message(results, kw)
         await q.message.reply_text(
             text,
@@ -190,12 +203,11 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             disable_web_page_preview=True,
         )
 
-    # ── Filter button tapped ──────────────────────────────────────────────────
     elif data.startswith("filter:"):
         parts = data.split(":", 2)
         kw  = parts[1]
         cat = parts[2]
-        results = engine.search(kw, category=None if cat == "all" else cat)
+        results = db.search(kw, category=None if cat == "all" else cat)
         text, kb = build_results_message(results, kw, category=cat)
         try:
             await q.edit_message_text(
@@ -215,16 +227,30 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main():
+async def main():
+    """Bot ka main loop. db/engine/scraper run.py inject karta hai."""
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",    start))
     app.add_handler(CommandHandler("help",     help_cmd))
     app.add_handler(CommandHandler("trending", trending_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    logger.info("✅ Bot is running...")
-    app.run_polling(drop_pending_updates=True)
+
+    logger.info("✅ Bot is running!")
+    await app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-    main()
+    async def _self_run():
+        global db, engine, scraper
+        from database import SearchDatabase
+        from search_engine import SearchEngine
+        from telegram_scraper import TelegramScraper
+        db      = SearchDatabase()
+        scraper = TelegramScraper(db)
+        engine  = SearchEngine(db, scraper=scraper)
+        logger.info("🔌 Connecting to Telegram API...")
+        await scraper.start()
+        logger.info("✅ Telethon connected!")
+        await main()
+    asyncio.run(_self_run())
